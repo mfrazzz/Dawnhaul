@@ -83,7 +83,7 @@ wait_for_network() {
 # Imaging drops smbfs and leaves the autofs trigger at Data/MyWorks.
 find_smbfs() {
   local share="$1"
-  local want="$2"
+  local want="${2:-}"
   local line mp smbfs="" auto=""
   while IFS= read -r line; do
     mp="${line#* on }"
