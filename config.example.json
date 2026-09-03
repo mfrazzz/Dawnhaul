@@ -1,0 +1,16 @@
+{
+  "seestar_host": "10.0.0.1",
+  "seestar_share": "MyWorks",
+  "seestar_method": "automount",
+  "seestar_volume": "/System/Volumes/Data/MyWorks",
+  "qnap_host": "100.72.231.12",
+  "qnap_share": "Pictures",
+  "qnap_user": "mfrazier",
+  "qnap_volume": "/Volumes/Pictures",
+  "nas_subdir": "AstroPeak",
+  "staging": "/Users/mfrazier/Dawnhaul/staging",
+  "state_dir": "/Users/mfrazier/Dawnhaul/state",
+  "mode": "siril",
+  "notify": true,
+  "keep_staging": true
+}

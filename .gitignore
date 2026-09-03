@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Runtime / operational artifacts (gitignored to keep the repo clean)
+staging/
+logs/
+state/
+
+# Real config contains host IPs and username — keep personal copy local
+config.json
+
+# Python
+__pycache__/
+*.pyc
