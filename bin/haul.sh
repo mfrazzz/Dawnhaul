@@ -1,6 +1,8 @@
 #!/bin/bash
-# Dawnhaul — mount Seestar + QNAP, copy new files, unmount Seestar.
+# Dawnhaul — autofs-attach Seestar + QNAP, copy new files. Pull-only from Seestar.
 # Safe to run by hand:  ~/Dawnhaul/bin/haul.sh
+# Both shares attach through autofs (/etc/auto_smb) as /System/Volumes/Data/*
+# because those paths are NOT blocked by macOS privacy for launchd, unlike /Volumes/*.
 set -euo pipefail
 
 ROOT="${HOME}/Dawnhaul"
@@ -79,31 +81,10 @@ wait_for_network() {
   return 1
 }
 
-# smbfs (already attached) or autofs map auto_smb (needs a list to attach).
-# Imaging drops smbfs and leaves the autofs trigger at Data/MyWorks.
-find_smbfs() {
-  local share="$1"
-  local want="${2:-}"
-  local line mp smbfs="" auto=""
-  while IFS= read -r line; do
-    mp="${line#* on }"
-    mp="${mp%% (*}"
-    if [[ -n "${want}" && "$mp" == "${want}" ]] || [[ "$mp" == */"$share" ]]; then
-      case "$line" in
-        *smbfs*) smbfs="$mp" ;;
-        *autofs*) auto="$mp" ;;
-      esac
-    fi
-  done < <(mount)
-  if [[ -n "$smbfs" ]]; then
-    printf '%s\n' "$smbfs"
-    return 0
-  fi
-  if [[ -n "$auto" ]]; then
-    printf '%s\n' "$auto"
-    return 0
-  fi
-  return 1
+# Fast TCP reachability check (~3s max). Avoids long autofs hangs when a host is down.
+port_up() {
+  local host="$1" port="${2:-445}"
+  nc -z -G 5 "${host}" "${port}" >/dev/null 2>&1
 }
 
 share_live() {
@@ -124,102 +105,27 @@ sys.exit(0)
 LIVEPY
 }
 
-trigger_automount() {
-  local tries="$1"
-  local i rc path found seen_paths
-  local -a cands
-  cands=()
-  seen_paths=$'\n'
-  found="$(find_smbfs "${SEESTAR_SHARE}" "${SEESTAR_VOL}" || true)"
-  for path in "${SEESTAR_VOL}" "${found}"; do
-    [[ -n "${path}" ]] || continue
-    case "${seen_paths}" in
-      *$'\n'"${path}"$'\n'*) continue ;;
-    esac
-    seen_paths="${seen_paths}${path}"$'\n'
-    cands+=("${path}")
-  done
+# Listing an autofs trigger path (e.g. /System/Volumes/Data/MyWorks) makes
+# automountd attach the smbfs share defined in /etc/auto_smb. No Finder, no osascript.
+attach_autofs() {
+  local label="$1" vol="$2" tries="$3" host="$4"
+  local i rc
   for i in $(seq 1 "${tries}"); do
-    for path in "${cands[@]}"; do
-      log "seestar   trying ${path}  (try ${i}/${tries})"
-      set +e
-      share_live "${path}"
-      rc=$?
-      set -e
-      if [[ "${rc}" -eq 0 ]]; then
-        SEESTAR_VOL="${path}"
-        log "seestar   ready  ${path}"
-        return 0
-      fi
-      if [[ "${rc}" -eq 3 ]]; then
-        log "warn      ${path} blocked by macOS privacy — grant Full Disk Access to Terminal (and /bin/bash for launchd)"
-      elif [[ "${rc}" -eq 2 ]]; then
-        log "seestar   timed out  ${path} (scope still down?)"
-      fi
-    done
-    sleep 6
-  done
-  return 1
-}
-
-clear_stale() {
-  local vol="$1" rc
-  [[ -n "${vol}" ]] || return 0
-  # Never unmount auto_smb / Data-volume maps.
-  case "${vol}" in
-    /System/Volumes/Data/MyWorks|/System/Volumes/Data/home) return 0 ;;
-  esac
-  if [[ "${vol}" == /System/Volumes/Data/* && "${vol}" != /System/Volumes/Data/Volumes/* ]]; then
-    return 0
-  fi
-  set +e
-  share_live "${vol}"
-  rc=$?
-  set -e
-  # 3 = privacy blocked — the mount is probably real. Do not unmount it.
-  if [[ "${rc}" -eq 3 ]]; then
-    return 0
-  fi
-  if [[ -e "${vol}" && "${rc}" -ne 0 ]]; then
-    log "mount     stale  ${vol} — forcing unmount"
-    diskutil unmount force "${vol}" >/dev/null 2>&1 || umount -f "${vol}" >/dev/null 2>&1 || true
-  fi
-  if [[ "${vol}" == /Volumes/* && -d "${vol}" ]] && ! find_smbfs "$(basename "${vol}")" >/dev/null; then
-    rmdir "${vol}" >/dev/null 2>&1 || true
-  fi
-}
-
-MOUNT_PATH=""
-WE_MOUNTED=0
-mount_smb() {
-  local url="$1"
-  local share="$2"
-  local tries="$3"
-  local i j found
-  WE_MOUNTED=0
-  MOUNT_PATH=""
-  found="$(find_smbfs "${share}" || true)"
-  if [[ -n "${found}" ]] && share_live "${found}"; then
-    log "mount     already up  ${found}  (smbfs)"
-    MOUNT_PATH="${found}"
-    return 0
-  fi
-  clear_stale "${found}"
-  clear_stale "/Volumes/${share}"
-  for i in $(seq 1 "${tries}"); do
-    log "mount     ${url}  (try ${i}/${tries})"
-    osascript -e "mount volume \"${url}\"" >/dev/null 2>&1 || true
-    for j in $(seq 1 12); do
-      found="$(find_smbfs "${share}" || true)"
-      if [[ -n "${found}" ]] && share_live "${found}"; then
-        log "mount     ready  ${found}"
-        MOUNT_PATH="${found}"
-        WE_MOUNTED=1
-        return 0
-      fi
-      sleep 2
-    done
-    sleep 5
+    log "${label}   waiting for ${vol}  (try ${i}/${tries})"
+    set +e
+    share_live "${vol}"
+    rc=$?
+    set -e
+    if [[ "${rc}" -eq 0 ]]; then
+      log "${label}   ready  ${vol}"
+      return 0
+    fi
+    if [[ "${rc}" -eq 3 ]]; then
+      log "warn      ${vol} blocked by macOS privacy — grant Full Disk Access to Terminal (and /bin/bash for launchd)"
+    elif [[ "${rc}" -eq 2 ]]; then
+      log "${label}   timed out  ${host} (still down?)"
+    fi
+    sleep 4
   done
   return 1
 }
@@ -239,43 +145,35 @@ else
   log "network   tailscale CLI not on PATH (ok if the app is running)"
 fi
 
-SEESTAR_URL="smb://${SEESTAR_HOST}/${SEESTAR_SHARE}"
-QNAP_URL="smb://${QNAP_USER}@${QNAP_HOST}/${QNAP_SHARE}"
-
-SEESTAR_WE_MOUNTED=0
-if [[ "${SEESTAR_METHOD}" == "automount" ]]; then
-  log "seestar   automount  ${SEESTAR_VOL}"
-  if trigger_automount 8; then
-    :
-  else
-    log "warn      automount path not listable — falling back to Finder mount"
-    if mount_smb "${SEESTAR_URL}" "${SEESTAR_SHARE}" 10; then
-      SEESTAR_VOL="${MOUNT_PATH}"
-      SEESTAR_WE_MOUNTED="${WE_MOUNTED}"
-    else
-      log "warn      Seestar did not mount — will still push anything already in staging"
-      SEESTAR_VOL=""
-    fi
-  fi
+# ---- Seestar (autofs) ----
+if [[ "${SEESTAR_METHOD}" != "automount" ]]; then
+  log "seestar   warning: seestar_method should be \"automount\" for autofs; using ${SEESTAR_METHOD}"
+fi
+if ! port_up "${SEESTAR_HOST}" 445; then
+  log "warn      Seestar unreachable on port 445 (${SEESTAR_HOST}) — will push staging only"
+  SEESTAR_VOL=""
 else
-  # Finder / Connect to Server
-  if mount_smb "${SEESTAR_URL}" "${SEESTAR_SHARE}" 12; then
-    SEESTAR_VOL="${MOUNT_PATH}"
-    SEESTAR_WE_MOUNTED="${WE_MOUNTED}"
-  else
-    log "warn      Seestar did not mount — will still push anything already in staging"
+  if ! attach_autofs "seestar" "${SEESTAR_VOL}" 8 "${SEESTAR_HOST}"; then
+    log "warn      Seestar autofs path not attachable — will push staging only"
     SEESTAR_VOL=""
   fi
 fi
 
-if ! mount_smb "${QNAP_URL}" "${QNAP_SHARE}" 10; then
-  log "err       QNAP did not mount. Connect once in Finder, save the password to Keychain, then retry."
+# ---- QNAP (autofs) ----
+if ! port_up "${QNAP_HOST}" 445; then
+  log "err       QNAP unreachable on port 445 (${QNAP_HOST})"
   if [[ "${NOTIFY}" == "yes" ]]; then
-    osascript -e 'display notification "QNAP did not mount — open Finder and save the password." with title "Dawnhaul"' || true
+    osascript -e 'display notification "QNAP unreachable — check power/VPN." with title "Dawnhaul"' || true
   fi
   exit 2
 fi
-QNAP_VOL="${MOUNT_PATH}"
+if ! attach_autofs "qnap" "${QNAP_VOL}" 8 "${QNAP_HOST}"; then
+  log "err       QNAP autofs path not attachable (${QNAP_VOL})"
+  if [[ "${NOTIFY}" == "yes" ]]; then
+    osascript -e 'display notification "QNAP mount failed — check /etc/auto_smb." with title "Dawnhaul"' || true
+  fi
+  exit 2
+fi
 
 export DAWNHAUL_SEESTAR="${SEESTAR_VOL}"
 export DAWNHAUL_QNAP="${QNAP_VOL}"
@@ -285,11 +183,7 @@ python3 "${ROOT}/bin/haul.py"
 RC=$?
 set -e
 
-# Never unmount autofs. Only unmount a Finder share we mounted this run.
-if [[ "${SEESTAR_METHOD}" != "automount" && "${SEESTAR_WE_MOUNTED}" -eq 1 && "${SEESTAR_VOL}" == /Volumes/* ]]; then
-  diskutil unmount "${SEESTAR_VOL}" >/dev/null 2>&1 || umount "${SEESTAR_VOL}" >/dev/null 2>&1 || true
-  log "unmount   ${SEESTAR_VOL}"
-fi
+# autofs mounts under /System/Volumes/Data are never unmounted here.
 
 if [[ "${RC}" -eq 0 ]]; then
   log "done      ok"
@@ -303,4 +197,3 @@ else
   fi
 fi
 exit "${RC}"
-
