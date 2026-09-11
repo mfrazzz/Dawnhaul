@@ -5,7 +5,7 @@
 # because those paths are NOT blocked by macOS privacy for launchd, unlike /Volumes/*.
 set -euo pipefail
 
-ROOT="${HOME}/Dawnhaul"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${ROOT}/config.json"
 LOG_DIR="${ROOT}/logs"
 STAMP="$(date +%Y-%m-%d)"
@@ -68,7 +68,7 @@ caffeinate -i -w "$$" &
 CAFF_PID=$!
 trap 'rm -f "${LOCK}"; kill "${CAFF_PID}" 2>/dev/null || true' EXIT
 
-log "dawnhaul  starting  (scheduled 8:30 AM)"
+log "dawnhaul  starting"
 
 wait_for_network() {
   local i

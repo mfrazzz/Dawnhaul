@@ -8,8 +8,9 @@ automount) to a QNAP NAS. Entrypoint: `~/Dawnhaul/bin/haul.sh` (bash wrapper) �
 
 - Manual run: `~/Dawnhaul/bin/haul.sh --force` (safe). `--force` skips the once-per-day
   guard in `state/YYYY-MM-DD.json`. Without it, the script exits 0 if that run already happened.
-- Scheduled by launchd: `~/Library/LaunchAgents/com.dawnhaul.sync.plist` (8:30 / 9:30 / 10:30).
-  That plist lives OUTSIDE the repo; logs go to `logs/launchd.{out,err}.log`.
+- Scheduled by launchd: `~/Library/LaunchAgents/com.dawnhaul.sync.plist` (7:00 / 8:00 / 9:00).
+  That plist lives OUTSIDE the repo (template: `com.dawnhaul.sync.plist.example`);
+  logs go to `logs/launchd.{out,err}.log`.
 - Logs: `logs/YYYY-MM-DD.log`. State/result JSON: `state/`.
 
 ## How mounts work (autofs, not Finder)
@@ -18,8 +19,13 @@ Both shares attach through the **auto_smb autofs map** (`/etc/auto_smb`), so the
 never touches `/Volumes/*`. `/Volumes/*` smbfs mounts are blocked by macOS privacy for a
 launchd-`/bin/bash` without Full Disk Access; `/System/Volumes/Data/*` autofs paths are not.
 - Seestar: `/System/Volumes/Data/MyWorks` → `//Guest@10.0.0.1/EMMC Images/MyWorks`.
-- QNAP: `/System/Volumes/Data/Pictures` → `//mfrazier:<pass>@100.72.231.12/Pictures`
+- QNAP: `/System/Volumes/Data/Pictures` → `//<qnap_user>:<pass>@<qnap_host>/Pictures`
   (password is URL-encoded inline — `%24` for `$`).
+- **Critical:** `/etc/auto_smb` is a *direct map* (full-path keys). It is NOT
+  auto-registered by automountd — `/etc/auto_master` must contain `/-  auto_smb`
+  (append-only; SIP blocks bootout/kickstart -k of automountd, so reload with
+  `sudo killall automountd` + `sudo launchctl kickstart system/com.apple.automountd`,
+  then verify `mount | grep auto_smb`).
 Listing a `/System/Volumes/Data/*` path makes automountd attach the share. Dawnhaul's
 `attach_autofs()` just does that after a `nc -z` port-445 liveness check. **Never unmount**
 any `/System/Volumes/Data/*` mount and never delete files on the Seestar.
@@ -48,15 +54,13 @@ handling or the guard, change BOTH.
 ## Config
 
 - `config.json` is the single source of truth: `seestar_*` (host 10.0.0.1, autofs path
-  `/System/Volumes/Data/MyWorks`), `qnap_*` (100.72.231.12, user mfrazier, autofs path
+  `/System/Volumes/Data/MyWorks`), `qnap_*` (<qnap_host>, user <qnap_user>, autofs path
   `/System/Volumes/Data/Pictures`), `staging`, `state_dir`, `mode`, `notify`,
-  `keep_staging`, `nas_subdir` (target folder under the QNAP Pictures share).
+  `keep_staging`, `nas_subdir` (target folder under the QNAP share).
 - The QNAP password lives inline (URL-encoded) in `/etc/auto_smb`, not in `config.json`.
-  There is also a System Keychain item (`autofs_smb_share`, service name) used by the
-  legacy `/etc/auto_smb_map`; the live map is `/etc/auto_smb`.
 - `mode` selects the staging layout: `siril` (dirs ending `_sub` → `<obj>/lights/`,
   mosaic dirs → `<obj>/` with `lights/`), `science`, `keepers`, else `archive`.
-- **README.txt can drift from `config.json`** (e.g., it says NAS folder `AstroPeak`). The code
+- **README.md can drift from `config.json`** (e.g., it says NAS folder `AstroPeak`). The code
   reads `config.json` only — trust config.json + the scripts over README prose.
 
 ## Directory roles
