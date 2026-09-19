@@ -58,6 +58,10 @@ handling or the guard, change BOTH.
   `/System/Volumes/Data/Pictures`), `staging`, `state_dir`, `mode`, `notify`,
   `keep_staging`, `nas_subdir` (target folder under the QNAP share).
 - The QNAP password lives inline (URL-encoded) in `/etc/auto_smb`, not in `config.json`.
+- `keep_staging: true` (default) leaves staging after a push. `false` (or `--prune`)
+  deletes a staging file during push when the NAS copy already exists at the same size
+  (a skip). Files copied this run stay until the next haul confirms them. Then empty
+  dirs are dropped. Never deletes anything on the Seestar.
 - `mode` selects the staging layout: `siril` (dirs ending `_sub` → `<obj>/lights/`,
   mosaic dirs → `<obj>/` with `lights/`), `science`, `keepers`, else `archive`.
 - **README.md can drift from `config.json`** (e.g., it says NAS folder `AstroPeak`). The code
@@ -67,6 +71,7 @@ handling or the guard, change BOTH.
 
 - `bin/` — scripts (`haul.sh`, `haul.py`, `uninstall.sh`). The actual program.
 - `staging/` — local buffer: files land here from the Seestar, then get pushed to the NAS.
-  Keep-staging is on; it is NOT cleared after a successful push.
+  With `keep_staging: true` it is left in place. With `false` or `--prune`, verified NAS
+  copies (same size) are removed from staging during the push.
 - `state/` — per-day result JSON + `last-run.json`; also `haul.lock` (pid lockfile, temporary).
 - `logs/` — dated run logs + `launchd.*`.

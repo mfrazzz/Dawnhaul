@@ -48,7 +48,20 @@ NOTIFY="$(python3 -c 'import json,sys; print("yes" if json.load(open(sys.argv[1]
 SEESTAR_VOL="$(short_vol "${SEESTAR_VOL}")"
 QNAP_VOL="$(short_vol "${QNAP_VOL}")"
 
-if [[ "${1:-}" != "--force" ]] && [[ -f "${ROOT}/state/${STAMP}.json" ]]; then
+FORCE=0
+PRUNE=0
+for arg in "$@"; do
+  case "${arg}" in
+    --force) FORCE=1 ;;
+    --prune) PRUNE=1 ;;
+    *)
+      log "err       unknown argument: ${arg}  (use --force and/or --prune)"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${FORCE}" -eq 0 && "${PRUNE}" -eq 0 ]] && [[ -f "${ROOT}/state/${STAMP}.json" ]]; then
   log "skip      already completed a haul today (${STAMP}); pass --force to run anyway"
   exit 0
 fi
@@ -169,6 +182,7 @@ if ! port_up "${QNAP_HOST}" 445; then
 fi
 if ! attach_autofs "qnap" "${QNAP_VOL}" 8 "${QNAP_HOST}"; then
   log "err       QNAP autofs path not attachable (${QNAP_VOL})"
+  log "hint      after an OS upgrade, reload automountd: sudo killall automountd; sudo launchctl kickstart system/com.apple.automountd"
   if [[ "${NOTIFY}" == "yes" ]]; then
     osascript -e 'display notification "QNAP mount failed — check /etc/auto_smb." with title "Dawnhaul"' || true
   fi
@@ -179,7 +193,11 @@ export DAWNHAUL_SEESTAR="${SEESTAR_VOL}"
 export DAWNHAUL_QNAP="${QNAP_VOL}"
 
 set +e
-python3 "${ROOT}/bin/haul.py"
+if [[ "${PRUNE}" -eq 1 ]]; then
+  python3 "${ROOT}/bin/haul.py" --prune
+else
+  python3 "${ROOT}/bin/haul.py"
+fi
 RC=$?
 set -e
 

@@ -6,6 +6,7 @@ then from staging onto the QNAP share. Never deletes anything on the Seestar.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -59,6 +60,8 @@ def copy_data(src: Path, dst_tmp: Path) -> None:
     dst_tmp.parent.mkdir(parents=True, exist_ok=True)
     with open(src, "rb") as fsrc, open(dst_tmp, "wb") as fdst:
         shutil.copyfileobj(fsrc, fdst, length=1024 * 1024)
+        fdst.flush()
+        os.fsync(fdst.fileno())
     try:
         st = src.stat()
         os.utime(dst_tmp, (st.st_atime, st.st_mtime))
@@ -66,7 +69,29 @@ def copy_data(src: Path, dst_tmp: Path) -> None:
         pass
 
 
-def copy_if_new(src: Path, dst: Path, stats: dict) -> None:
+def commit_copy(tmp: Path, dst: Path, size: int, attempts: int = 4) -> None:
+    delay = 1.5
+    for i in range(1, attempts + 1):
+        try:
+            tmp.replace(dst)
+            return
+        except OSError as exc:
+            if getattr(exc, "errno", None) not in (errno.EIO, errno.EBUSY, errno.ETIMEDOUT):
+                raise
+            try:
+                if dst.is_file() and dst.stat().st_size == size:
+                    tmp.unlink(missing_ok=True)
+                    return
+            except OSError:
+                pass
+            if i == attempts:
+                raise
+            log(f"retry     rename {dst.name}  (try {i + 1}/{attempts})")
+            time.sleep(delay)
+            delay *= 2
+
+
+def copy_if_new(src: Path, dst: Path, stats: dict, prune_src: bool = False) -> None:
     if skip_name(src.name) or not src.is_file():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -80,13 +105,20 @@ def copy_if_new(src: Path, dst: Path, stats: dict) -> None:
         try:
             if dst.stat().st_size == size:
                 stats["skipped"] += 1
+                if prune_src:
+                    try:
+                        src.unlink()
+                        stats["pruned"] += 1
+                    except OSError as exc:
+                        stats["errors"] += 1
+                        log(f"err       prune failed {src.name}: {exc}")
                 return
         except OSError:
             pass
     tmp = dst.parent / (dst.name + ".dawnhaul")
     try:
         copy_data(src, tmp)
-        tmp.replace(dst)
+        commit_copy(tmp, dst, size)
     except OSError as exc:
         stats["errors"] += 1
         log(f"err       copy failed {src.name}: {exc}")
@@ -174,12 +206,34 @@ def pull_keepers(src_root: Path, staging: Path, stats: dict) -> None:
                 copy_if_new(f, dest / f.name, stats)
 
 
-def push_staging(staging: Path, nas: Path, stats: dict) -> None:
+def push_staging(staging: Path, nas: Path, stats: dict, prune: bool = False) -> None:
     if not staging.exists():
         return
+    scanned = 0
     for f in iter_files(staging):
         rel = f.relative_to(staging)
-        copy_if_new(f, nas / rel, stats)
+        copy_if_new(f, nas / rel, stats, prune_src=prune)
+        scanned += 1
+        if scanned == 1 or scanned % 100 == 0:
+            extra = f" pruned {stats['pruned']}" if prune else ""
+            log(
+                f"push      scanned {scanned}  "
+                f"copied {stats['copied']} skipped {stats['skipped']} "
+                f"errors {stats['errors']}{extra}"
+            )
+
+
+def drop_empty_dirs(root: Path) -> None:
+    if not root.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        path = Path(dirpath)
+        if path == root:
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -214,17 +268,24 @@ def main() -> int:
     else:
         log(f"warn      Seestar volume not mounted at {seestar} — push staging only")
 
-    push_stats = {"copied": 0, "skipped": 0, "errors": 0, "bytes": 0}
+    push_stats = {"copied": 0, "skipped": 0, "errors": 0, "bytes": 0, "pruned": 0}
     if not nas_root.parent.exists():
         log(f"err       QNAP volume not mounted at {qnap_vol}")
         return 2
     nas_root.mkdir(parents=True, exist_ok=True)
+    keep_staging = bool(cfg.get("keep_staging", True))
+    do_prune = (not keep_staging) or ("--prune" in sys.argv)
     log(f"push      {staging} → {nas_root}")
-    push_staging(staging, nas_root, push_stats)
+    push_staging(staging, nas_root, push_stats, prune=do_prune)
     log(
         f"push      copied {push_stats['copied']}, skipped {push_stats['skipped']}, "
         f"errors {push_stats['errors']}"
     )
+    if do_prune:
+        drop_empty_dirs(staging)
+        log(f"prune     removed {push_stats['pruned']} already on NAS")
+    else:
+        log("prune     skipped (keep_staging)")
 
     result = {
         "pulled": stats,

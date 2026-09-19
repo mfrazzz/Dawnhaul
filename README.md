@@ -51,6 +51,8 @@ cp config.example.json config.json
 - `qnap_volume` = autofs path of the NAS share. Default
   `/System/Volumes/Data/Pictures`.
 - `mode` selects the staging layout, see [Modes](#modes).
+- `keep_staging` controls whether verified NAS copies are removed from
+  staging, see [Staging](#staging).
 - `staging` / `state_dir` default to `~/Dawnhaul/staging`, `~/Dawnhaul/state`.
 
 ### 2. Configure autofs (this is the whole trick)
@@ -102,8 +104,15 @@ cd ~/Dawnhaul
 bin/haul.sh --force
 ```
 
-`--force` ignores the once-per-day guard so you can test repeatedly. Watch
-`logs/YYYY-MM-DD.log` and a macOS notification on completion.
+`--force` ignores the once-per-day guard so you can test repeatedly.
+`--prune` deletes staging files that already exist on the NAS at the same
+size (same as `keep_staging: false` for one run). Combine them:
+
+```sh
+bin/haul.sh --force --prune
+```
+
+Watch `logs/YYYY-MM-DD.log` and a macOS notification on completion.
 
 ### 4. Schedule it
 
@@ -139,8 +148,23 @@ the original setup: the QNAP was at a Tailscale IP).
 | `keepers` | each top-level dir → staging/<dir>, keeps FIT/JPG/MOV             |
 | else      | `archive`: flat copy preserving relative paths under staging      |
 
-`keep_staging: true` keeps the staging folder after a success so a NAS
-glitch never loses a night; run again (`--force`) to retry the push.
+## Staging
+
+Captures land in `staging/` first, then get pushed to the NAS. That buffer
+is what makes a Tailscale blip safe.
+
+| setting / flag | what happens |
+|----------------|--------------|
+| `keep_staging: true` (default) | staging is left in place after a push |
+| `keep_staging: false` | during push, a staging file is deleted only if the NAS copy already exists at the **same size** (a skip) |
+| `bin/haul.sh --prune` | same as `keep_staging: false`, for one run, without changing config |
+
+Files **copied this run** stay in staging until the next haul confirms them
+on the NAS. Empty directories are dropped after a prune. Nothing on the
+Seestar is ever deleted.
+
+`--prune` also bypasses the once-per-day guard, so you can prune later the
+same day without `--force`.
 
 ## What it never does
 
@@ -177,11 +201,29 @@ re-run the killall/kickstart sequence.
 Tailscale, make sure the app/CLI is up before the job (or add an earlier
 StartCalendarInterval entry).
 
+### Autofs path not attachable after an OS upgrade
+Reload automountd, then confirm the map:
+
+```sh
+sudo killall automountd; sleep 2; sudo launchctl kickstart system/com.apple.automountd
+mount | grep auto_smb
+ls /System/Volumes/Data/Pictures
+```
+
+Do **not** fall back to `/Volumes/Pictures` — that path is blocked for
+launchd and a stale Finder mount will hang the push.
+
+### "Input/output error" during copy / rename
+Transient SMB glitch (common over Tailscale). Dawnhaul writes bytes to a
+`.dawnhaul` temp file, fsyncs, then renames. Rename retries a few times on
+EIO; if the NAS file already matches size, it counts as success. Failed
+files stay in staging and retry on the next `--force`.
+
 ## Project layout
 
 ```
-bin/haul.sh               bash wrapper: guard, lock, port checks, autofs attach
-bin/haul.py               copy engine: pull → staging → push, modes, state
+bin/haul.sh               bash wrapper: guard, lock, autofs attach; --force / --prune
+bin/haul.py               copy engine: pull → staging → push, prune, modes, state
 bin/uninstall.sh          removes the launch agent
 config.example.json       template; copy to config.json and edit
 com.dawnhaul.sync.plist.example  launchd template; fix paths before install
