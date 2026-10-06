@@ -1,11 +1,14 @@
 # Dawnhaul
 
-Moves last night's Seestar astro captures from the Seestar to a NAS,
-without Finder and without anyone sitting at the Mac.
+Dawnhual (original code came from Grok AI, and then updated and
+enhanced using OpenCode AI with Grok and Big Pickle LLMs) was my solution
+to having a Seestar and Mac Mini hosted at a remote location 
+(AstroPeak Remote Observatory in my case) and automating moving the
+previous night's Seestar fits files to a NAS located on my local LAN.
 
 Pull-only from the Seestar: the scope is the source of truth and Dawnhaul
-never deletes or moves files on it. Captures are copied into a local
-staging folder first, then pushed to the NAS. If the NAS is briefly
+never deletes or moves files on it. Captures are copied into a staging 
+folder on the Mac first, then pushed to the NAS. If the NAS is briefly
 unreachable, the night's data is already safe on the Mac.
 
 ## How it works
@@ -26,11 +29,15 @@ paths are *not* blocked by macOS privacy for a non-elevated launchd job
 
 ## What you need
 
-- A Mac (any Intel/Apple Silicon; used with macOS 26, autofs meat unchanged
+- A Mac (any Apple Silicon or Intel based); used with macOS 26, autofs meat unchanged
   on older versions)
 - A Seestar S50/S30 on the same Wi-Fi as the Mac (its SMB share `EMMC Images`
   contains a `MyWorks` folder; roughly `//Guest@SEESTAR_IP/EMMC%20Images/MyWorks`)
-- A QNAP (or any SMB NAS) with a target share that accepts user/password auth
+- A NAS running SMB (mine is QNAP) with a target share that accepts user/password auth
+- Python installed on the Mac (easiest to do this with Homebrew)
+- Grant Full Disk Access to /bin/bash, Terminal, iTerm2, or whatever default terminal
+  program you use.
+- A network connection between the Mac and the NAS (I use Tailscale).
 
 ## Install
 
@@ -55,7 +62,7 @@ cp config.example.json config.json
   staging, see [Staging](#staging).
 - `staging` / `state_dir` default to `~/Dawnhaul/staging`, `~/Dawnhaul/state`.
 
-### 2. Configure autofs (this is the whole trick)
+### 2. Configure autofs
 
 Create `/etc/auto_smb` (root-owned). Two lines, URL-encoded credentials:
 
