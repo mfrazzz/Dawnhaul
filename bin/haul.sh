@@ -13,7 +13,13 @@ LOG="${LOG_DIR}/${STAMP}.log"
 LOCK="${ROOT}/state/haul.lock"
 mkdir -p "${LOG_DIR}" "${ROOT}/state" "${ROOT}/staging"
 
-exec >>"${LOG}" 2>&1
+# launchd runs have no terminal: keep them log-only so launchd.out.log does not
+# duplicate the (large) run log. Hand runs echo to the terminal as well.
+if [[ -t 1 ]]; then
+  exec > >(tee -a "${LOG}") 2>&1
+else
+  exec >>"${LOG}" 2>&1
+fi
 
 log() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -118,11 +124,82 @@ sys.exit(0)
 LIVEPY
 }
 
+# Prints every mountpoint holding the same SMB share as ${vol}, one per line.
+# A second mount of the same share (normally a stale Finder mount under
+# /Volumes) makes smbfs reuse that session's mount mode. Finder mounts are made
+# without noowners, so the autofs trigger can come up root-owned 0700 and deny
+# the user with EACCES — reloading automountd does NOT clear that.
+duplicate_mounts() {
+  local vol="$1" src
+  src="$(mount | awk -v p="${vol}" '$3 == p && $1 ~ /^\/\// {print $1; exit}')"
+  [[ -n "${src}" ]] || return 1
+  mount | awk -v s="${src}" '$1 == s {print $3}'
+}
+
+# Succeeds when smbfs still holds a live session for the share mounted at
+# ${vol}. Matches on the share component of the mount source against the share
+# names smbutil reports, so it does not depend on how config spells host/share.
+smb_session() {
+  local vol="$1"
+  python3 - "${vol}" <<'SESSPY'
+import subprocess, sys, urllib.parse
+vol = sys.argv[1]
+src = ""
+for line in subprocess.run(["mount"], capture_output=True, text=True).stdout.splitlines():
+    f = line.split()
+    if len(f) >= 3 and f[0].startswith("//") and f[2] == vol:
+        src = f[0]
+        break
+if not src:
+    sys.exit(1)
+rest = src[2:]
+if "@" in rest:
+    rest = rest.split("@", 1)[1]
+path = rest.split("/", 1)[1] if "/" in rest else ""
+want = urllib.parse.unquote(path.split("/", 1)[0]).lower()
+out = subprocess.run(["smbutil", "statshares", "-a"], capture_output=True, text=True).stdout
+sys.exit(0 if any(l.strip().lower() == want for l in out.splitlines()) else 1)
+SESSPY
+}
+
+# EACCES on an autofs smbfs path is NOT a TCC/Full-Disk-Access problem. Name the
+# real cause instead. Two seen in practice:
+#   1. stale mount - the mountpoint is still mounted but its SMB session is
+#      gone. automountd can never mount over an occupied mountpoint, so the
+#      trigger never re-fires and every access is EACCES. Reloading automountd
+#      does NOT help: the orphan mount outlives automountd.
+#   2. duplicate mount - the same share is also mounted elsewhere (usually a
+#      Finder /Volumes mount made without noowners), so smbfs reuses that
+#      session's restrictive 0700 mount mode.
+# Never chmod: this is a mount/session problem, not Unix permissions.
+diagnose_eacces() {
+  local vol="$1" dups
+  if mount | grep -qF " on ${vol} (" && ! smb_session "${vol}"; then
+    log "warn      ${vol} EACCES — STALE MOUNT: still mounted, but smbfs has no session for it"
+    log "warn      automountd cannot mount over an occupied mountpoint; attempting auto-recovery"
+    if sudo -n /sbin/umount "${vol}" 2>/dev/null; then
+      log "info      auto-recovered: unmounted stale ${vol} (re-attach will occur on next trigger)"
+      return 0
+    else
+      log "warn      failed to auto-unmount ${vol}; clear manually: sudo umount ${vol}"
+    fi
+    return 0
+  fi
+  dups="$(duplicate_mounts "${vol}" | grep -vx "${vol}" || true)"
+  if [[ -n "${dups}" ]]; then
+    log "warn      ${vol} EACCES — same SMB share is also mounted at: $(printf '%s ' ${dups})"
+    log "warn      duplicate mount sets the mount mode; clear it with: umount ${dups%% *}"
+    return 0
+  fi
+  log "warn      ${vol} EACCES — mount mode, not a TCC block (Full Disk Access is already granted)"
+  log "warn      inspect with: ls -ld ${vol}   (the mount must be owned by you; mode may be 0700 or 0777)"
+}
+
 # Listing an autofs trigger path (e.g. /System/Volumes/Data/MyWorks) makes
 # automountd attach the smbfs share defined in /etc/auto_smb. No Finder, no osascript.
 attach_autofs() {
   local label="$1" vol="$2" tries="$3" host="$4"
-  local i rc
+  local i rc explained=0
   for i in $(seq 1 "${tries}"); do
     log "${label}   waiting for ${vol}  (try ${i}/${tries})"
     set +e
@@ -134,7 +211,11 @@ attach_autofs() {
       return 0
     fi
     if [[ "${rc}" -eq 3 ]]; then
-      log "warn      ${vol} blocked by macOS privacy — grant Full Disk Access to Terminal (and /bin/bash for launchd)"
+      # Explain once per share; repeating it on every retry buries the log.
+      if [[ "${explained}" -eq 0 ]]; then
+        diagnose_eacces "${vol}"
+        explained=1
+      fi
     elif [[ "${rc}" -eq 2 ]]; then
       log "${label}   timed out  ${host} (still down?)"
     fi
@@ -182,7 +263,7 @@ if ! port_up "${QNAP_HOST}" 445; then
 fi
 if ! attach_autofs "qnap" "${QNAP_VOL}" 8 "${QNAP_HOST}"; then
   log "err       QNAP autofs path not attachable (${QNAP_VOL})"
-  log "hint      after an OS upgrade, reload automountd: sudo killall automountd; sudo launchctl kickstart system/com.apple.automountd"
+  log "hint      see the EACCES warnings above; do NOT chmod (this is a mount-mode issue, not Unix permissions)"
   if [[ "${NOTIFY}" == "yes" ]]; then
     osascript -e 'display notification "QNAP mount failed — check /etc/auto_smb." with title "Dawnhaul"' || true
   fi

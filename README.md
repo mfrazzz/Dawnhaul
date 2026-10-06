@@ -170,13 +170,47 @@ same day without `--force`.
 
 - **Never unmounts** `/System/Volumes/Data/MyWorks` or
   `/System/Volumes/Data/Pictures`. They are autofs triggers; the script only
-  lists them.
+  lists them. (The one manual exception is a stale orphan mount — see
+  Troubleshooting below.)
 - **Never deletes files on the Seestar.**
 - **Never copies SMB extended attributes.** `haul.py` copies file bytes only
   (`shutil.copyfileobj`), because macOS `copyfile(COPYFILE_ALL)` pulls SMB
   xattrs and fails with EPERM.
 
 ## Troubleshooting
+
+### "Permission denied" on `/System/Volumes/Data/Pictures` (EACCES)
+
+This is **not** a Full Disk Access problem and **not** something `chmod` can fix
+— Full Disk Access is already granted to `/bin/bash`, `/bin/zsh`, Terminal and
+iTerm2. `haul.sh` names the actual cause in the log. Work through it in this
+order:
+
+1. **Stale orphan mount (most common).** `mount` still lists the smbfs mount,
+   but smbfs has no session behind it: the QNAP dropped the connection and left
+   the mount entry behind. automountd can never mount over an occupied
+   mountpoint, so the trigger never re-fires and every access returns `EACCES`.
+   Reloading automountd does **not** help — the orphan outlives automountd.
+
+   Confirm and clear it:
+
+   ```sh
+   smbutil statshares -a     # Pictures is ABSENT while mount lists it
+   nc -z <qnap_host> 445      # still answers, so the NAS is up
+   sudo umount /System/Volumes/Data/Pictures
+   ls /System/Volumes/Data/Pictures    # re-triggers a fresh attach
+   ```
+
+   Nothing is at risk: with no session the share is unreachable anyway. This is
+   the only sanctioned exception to the never-unmount rule, and it is a manual,
+   diagnosed step — Dawnhaul never does it itself.
+2. **Duplicate mount.** The same share is also mounted elsewhere, usually a
+   Finder *Connect to Server* at `/Volumes/Pictures`. Finder mounts are made
+   without `noowners`, so smbfs reuses that session's restrictive `0700` mount
+   mode on the autofs trigger. Fix by `umount`ing the `/Volumes/*` duplicate.
+   Prevention: do not *Connect to Server* the QNAP `Pictures` share in Finder.
+3. Otherwise it is the mount's own mode. The mount must be owned by you; the
+   mode may be `0700` (`Pictures`) or `0777` (`MyWorks`) — both are fine.
 
 ### "Operation not permitted" during copy
 That is a macOS **privacy** block, not a Unix permission bit. It usually means
@@ -195,14 +229,18 @@ re-run the killall/kickstart sequence.
 - Check `logs/launchd.err.log` and `logs/launchd.out.log`.
 - Confirm the job loaded: `launchctl list | grep dawnhaul`.
 - Check the plist `ProgramArguments` path actually exists.
+- A manual run now echoes to the terminal, so `bin/haul.sh --force` failing is
+  visible immediately; the log is still the source of truth.
 
 ### QNAP unreachable (exit 2)
 `port_up` probes TCP 445 on `qnap_host`. If the NAS only answers over
 Tailscale, make sure the app/CLI is up before the job (or add an earlier
 StartCalendarInterval entry).
 
-### Autofs path not attachable after an OS upgrade
-Reload automountd, then confirm the map:
+### Autofs path not attachable
+If the log says `STALE MOUNT`, the automountd reload below will not help — use
+the stale-orphan procedure at the top of this section instead. Reloading is
+only useful right after an OS upgrade, to re-register the map:
 
 ```sh
 sudo killall automountd; sleep 2; sudo launchctl kickstart system/com.apple.automountd
@@ -211,7 +249,8 @@ ls /System/Volumes/Data/Pictures
 ```
 
 Do **not** fall back to `/Volumes/Pictures` — that path is blocked for
-launchd and a stale Finder mount will hang the push.
+launchd, and leaving a Finder mount of `Pictures` there poisons the autofs
+mount's mode.
 
 ### "Input/output error" during copy / rename
 Transient SMB glitch (common over Tailscale). Dawnhaul writes bytes to a
