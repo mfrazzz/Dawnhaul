@@ -29,7 +29,7 @@ paths are *not* blocked by macOS privacy for a non-elevated launchd job
 
 ## What you need
 
-- A Mac (any Apple Silicon or Intel based); used with macOS 26, autofs meat unchanged
+- A Mac (any Apple Silicon or Intel based); used with macOS 26, autofs behavior unchanged
   on older versions)
 - A Seestar S50/S30 on the same Wi-Fi as the Mac (its SMB share `EMMC Images`
   contains a `MyWorks` folder; roughly `//Guest@SEESTAR_IP/EMMC%20Images/MyWorks`)
